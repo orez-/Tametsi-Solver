@@ -5,6 +5,8 @@ import math
 import attr
 import numpy
 import PIL.Image
+import PIL.ImageFont
+import pytesseract
 import scipy.ndimage
 import scipy.spatial
 
@@ -158,6 +160,11 @@ def fetch_adjacencies(labeled, object_area, object_index, spacing=15):
     return result
 
 
+def mask_only_white(array):
+    lum = round(sum(array) / 3)
+    return 255 - (lum if lum > 240 else 0)
+
+
 def parse_tile(image, labeled, object_area, index, color_set):
     # limit both large arrays to just the area we care about,
     # then fetch the array of only the pixel values that are labeled with our index.
@@ -169,13 +176,98 @@ def parse_tile(image, labeled, object_area, index, color_set):
 
     shape = parse_polygon(object_area, figure_filter)
     adjacencies = fetch_adjacencies(labeled, object_area, index)
+    number = None
+    if color == SAFE_TILE_COLOR:
+        text = read_tile_number(image[object_area])
+        if text and text != '?':
+            number = int(text)
 
     return Tile.new(
         polygon=shape,
         color=color,
-        number=None,
+        number=number,
         mask_area=figure_filter,
     ), adjacencies
+
+
+def read_tile_number(image_slice):
+    """
+    Given a numpy slice of a tile, return the text from it.
+
+    See https://github.com/tesseract-ocr/tesseract/wiki/Command-Line-Usage
+    for options + explanations.
+    """
+    original_slice = image_slice
+    mask = (
+        (image_slice[:, :, 0] > 240)
+        | (image_slice[:, :, 1] > 240)
+        | (image_slice[:, :, 2] > 240)
+    )
+    labeled, num_objs = scipy.ndimage.label(mask)
+    object_areas = scipy.ndimage.find_objects(labeled)
+    filtered_areas = [
+        (i, (ys, xs))
+        for i, (ys, xs) in enumerate(object_areas, 1)
+        # filter out areas too thin to be text
+        if xs.stop - xs.start > 10 and ys.stop - ys.start > 10
+        # filter out weird aspect ratios
+        and 0.25 <= (xs.stop - xs.start) / (ys.stop - ys.start) <= 0.7
+    ]
+    result = ""
+
+    # import random  # debug
+    # j = random.randint(0, 10000)  # debug
+
+    # img = PIL.Image.fromarray(original_slice.astype('uint8'), 'RGB')  # debug
+    # img.save(f"results/{j}_original.gif")  # debug
+
+    for index, area in filtered_areas:
+        # question mark is two strokes, god help me.
+        # need to manually connect the dot back to the character
+        ys, xs = area
+        dot_potentials = [
+            (i, oys)
+            for i, (oys, oxs) in enumerate(object_areas, 1)
+            # roughly square
+            if 0.9 <= (oxs.stop - oxs.start) / (oys.stop - oys.start) <= 1.1
+            # relatively centered with our glyph
+            and math.isclose(((xs.stop + xs.start) / 2), ((oxs.stop + oxs.start) / 2), abs_tol=1)
+            # just below our glyph
+            and ys.stop < oys.start <= ys.stop + 10
+        ]
+        if dot_potentials:
+            # Could likely safely just call it a question mark now, but just to be safe..
+            # For real though if there's more than one of these I quit.
+            [(dot_index, oys)] = dot_potentials
+            # extend the y slice down below the dot
+            ys = slice(ys.start, oys.stop)
+            area = (ys, xs)
+            # note this _is_ going to poison the source, but.
+            # i truly dont care.
+            labeled[labeled == dot_index] = index
+
+        # Ok here's the meat.
+        area = expand_area(area, 3)
+        subslice = numpy.copy(image_slice[area])
+        # blank everything that's not our character
+        subslice[labeled[area] != index] = [0, 0, 0]
+
+        lum_mask = numpy.apply_along_axis(mask_only_white, 2, subslice)
+
+        img = PIL.Image.fromarray(lum_mask.astype('uint8'), 'L')
+        config = '--psm 10 --oem 3 -c tessedit_char_whitelist=0123456789?'
+        text = pytesseract.image_to_string(img, config=config)
+
+        # img.save(f"results/{j}_{index}_{text or 'unknown'}.gif")  # debug
+
+        if text:
+            if result:
+                print("uh found multiple, rip.", repr(text), repr(result))
+                return ""
+            result = text
+
+    # print(j, result or "ᖍ(ツ)ᖌ")  # debug
+    return result
 
 
 def parse_polygon(object_area, figure_filter):
@@ -183,7 +275,7 @@ def parse_polygon(object_area, figure_filter):
     Fetch the points of the polygon from the image data.
     """
     # Generate two grids the size of the object area, `range` style, sorta.
-    xs, ys = numpy.mgrid[object_area]
+    ys, xs = numpy.mgrid[object_area]
     # Convert em to a grid of points.
     # grid[x, y] = [x, y], except offset by the start of object_area
     grid = numpy.concatenate((xs[..., numpy.newaxis], ys[..., numpy.newaxis]), axis=-1)
@@ -228,6 +320,12 @@ def rotate(list_, rotate_amt):
 def simplify_polyon(vertices):
     return vertices
 
+
+def debug_cleanup():
+    import os
+    import shutil
+    shutil.rmtree('results')
+    os.mkdir('results')
 
 # def simplify_polyon(vertices, ε=5):
 #     """
@@ -314,7 +412,8 @@ def get_tile_draw_color(tile):
 
 
 def draw_board(board, i=None):
-    image = PIL.Image.new('RGBA', (2400, 2160), (0,0,0,255))
+    fnt = PIL.ImageFont.truetype('/Library/Fonts/Arial Black.ttf', 40)
+    image = PIL.Image.new('RGB', (2400, 2160), (0,0,0))
     pdraw = PIL.ImageDraw.Draw(image)
     for tile in board.tiles:
         color = get_tile_draw_color(tile)
@@ -325,6 +424,8 @@ def draw_board(board, i=None):
             if tile in adj:
                 color = (0xFF, 0, 0)
         pdraw.polygon(tile.polygon, fill=color)
+        if tile.number is not None:
+            pdraw.text((tile.click_point[0] - 20, tile.click_point[1] - 20), str(tile.number), font=fnt, fill=(255,255,255))
 
     # # highlight vertices, for debug
     # for tile in board.tiles:
@@ -338,7 +439,7 @@ def parse_board():
     image = PIL.Image.open('Capture.png')
     image = image.convert('RGB')
     array = numpy.array(image)
-    board_area = array[:, 720:3120].swapaxes(0, 1)
+    board_area = array[:, 720:3120]
 
     mask = (
         (board_area[:, :, 0] != BACKGROUND_COLOR[0])
@@ -347,7 +448,7 @@ def parse_board():
     )
     # `labeled` creates an array[x, y] = idx
     labeled, num_objs = scipy.ndimage.label(mask)
-    # visualize_labels(labeled)
+    # visualize_labeled(labeled)
     object_areas = scipy.ndimage.find_objects(labeled)
 
     color_set = TileColorSet()
@@ -368,6 +469,7 @@ def parse_board():
 
 
 def main():
+    # debug_cleanup()  # debug
     board = parse_board()
     draw_board(board).show()
     # for i in range(100):
