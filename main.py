@@ -435,8 +435,11 @@ def draw_board(board, highlighted=None):
     pdraw = PIL.ImageDraw.Draw(image)
     for tile in board.tiles:
         color = get_tile_draw_color(tile)
-        if isinstance(highlighted, int):
-            focus, adj = list(board._adjacencies.items())[highlighted]
+        if isinstance(highlighted, (int, Tile)):
+            if isinstance(highlighted, int):
+                focus, adj = list(board._adjacencies.items())[highlighted]
+            else:
+                focus, adj = board._adjacencies[highlighted]
             if tile == focus:
                 color = (0, 0, 0xFF)
             if tile in adj:
