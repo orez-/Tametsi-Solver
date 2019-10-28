@@ -6,6 +6,7 @@ import math
 import attr
 import numpy
 import PIL.Image
+import PIL.ImageDraw
 import PIL.ImageFont
 import pytesseract
 import scipy.ndimage
@@ -50,7 +51,7 @@ class Tile:
     mask_area: [] = attr.ib(repr=False)
 
     @classmethod
-    def new(self, polygon, color, mask_area, number=None):
+    def new(cls, polygon, color, mask_area, number=None):
         state = TileState.unsolved
         if color == SAFE_TILE_COLOR:
             state = TileState.safe
@@ -58,12 +59,8 @@ class Tile:
         elif color == FLAGGED_TILE_COLOR:
             state = TileState.flagged
             color = None
-        return Tile(
-            polygon=polygon,
-            color=color,
-            number=number,
-            tile_state=state,
-            mask_area=mask_area,
+        return cls(
+            polygon=polygon, color=color, number=number, tile_state=state, mask_area=mask_area
         )
 
     @property
@@ -106,14 +103,12 @@ class Constraint:
             max_mines = min_mines.max_mines
             min_mines = min_mines.min_mines
         return Constraint(
-            min_mines=max(min_mines, self.min_mines),
-            max_mines=min(max_mines, self.max_mines),
+            min_mines=max(min_mines, self.min_mines), max_mines=min(max_mines, self.max_mines)
         )
 
     def remove_mines(self, mines):
         return Constraint(
-            min_mines=max(0, self.min_mines - mines),
-            max_mines=self.max_mines - mines,
+            min_mines=max(0, self.min_mines - mines), max_mines=self.max_mines - mines
         )
 
 
@@ -126,11 +121,7 @@ class Board:
     @classmethod
     def new(cls, tiles, adjacencies):
         tiles = list(tiles)
-        board = Board(
-            tiles=tiles,
-            adjacencies=adjacencies,
-            constraints=[],
-        )
+        board = Board(tiles=tiles, adjacencies=adjacencies, constraints=[])
         board.generate_constraints()
         return board
 
@@ -149,7 +140,8 @@ class Board:
                 adj_tile for adj_tile in adjacencies if adj_tile.is_unsolved
             )
             constraints[unsolved_neighbors] = Constraint(
-                min_mines=tile.number, max_mines=tile.number)
+                min_mines=tile.number, max_mines=tile.number
+            )
         self.constraints = constraints
 
     def constraint_for(self, tiles):
@@ -206,15 +198,25 @@ class Board:
                 constr1.min_mines - len(tiles1_exclusive),
                 0,
             )
-            merge_or_add(new_regions, overlap, self.constraint_for(overlap).merge(overlap_min, overlap_max))
-            merge_or_add(new_regions, tiles1_exclusive, self.constraint_for(tiles1_exclusive).merge(
-                min_mines=constr1.min_mines - overlap_max,
-                max_mines=constr1.max_mines - overlap_min,
-            ))
-            merge_or_add(new_regions, tiles2_exclusive, self.constraint_for(tiles2_exclusive).merge(
-                min_mines=constr2.min_mines - overlap_max,
-                max_mines=constr2.max_mines - overlap_min,
-            ))
+            merge_or_add(
+                new_regions, overlap, self.constraint_for(overlap).merge(overlap_min, overlap_max)
+            )
+            merge_or_add(
+                new_regions,
+                tiles1_exclusive,
+                self.constraint_for(tiles1_exclusive).merge(
+                    min_mines=constr1.min_mines - overlap_max,
+                    max_mines=constr1.max_mines - overlap_min,
+                ),
+            )
+            merge_or_add(
+                new_regions,
+                tiles2_exclusive,
+                self.constraint_for(tiles2_exclusive).merge(
+                    min_mines=constr2.min_mines - overlap_max,
+                    max_mines=constr2.max_mines - overlap_min,
+                ),
+            )
         new_regions.pop(frozenset(), 0)
         for tiles, constraint in new_regions.items():
             merge_or_add(self.constraints, tiles, constraint)
@@ -280,12 +282,10 @@ def parse_tile(image, labeled, object_area, index, color_set):
         if text and text != '?':
             number = int(text)
 
-    return Tile.new(
-        polygon=shape,
-        color=color,
-        number=number,
-        mask_area=figure_filter,
-    ), adjacencies
+    return (
+        Tile.new(polygon=shape, color=color, number=number, mask_area=figure_filter),
+        adjacencies,
+    )
 
 
 def read_tile_number(image_slice):
@@ -295,13 +295,12 @@ def read_tile_number(image_slice):
     See https://github.com/tesseract-ocr/tesseract/wiki/Command-Line-Usage
     for options + explanations.
     """
-    original_slice = image_slice
     mask = (
         (image_slice[:, :, 0] > 240)
         | (image_slice[:, :, 1] > 240)
         | (image_slice[:, :, 2] > 240)
     )
-    labeled, num_objs = scipy.ndimage.label(mask)
+    labeled, _ = scipy.ndimage.label(mask)
     object_areas = scipy.ndimage.find_objects(labeled)
     filtered_areas = [
         (i, (ys, xs))
@@ -312,8 +311,6 @@ def read_tile_number(image_slice):
         and 0.25 <= (xs.stop - xs.start) / (ys.stop - ys.start) <= 0.7
     ]
     result = ""
-
-
 
     for index, area in filtered_areas:
         # question mark is two strokes, god help me.
@@ -352,7 +349,6 @@ def read_tile_number(image_slice):
         config = '--psm 10 --oem 3 -c tessedit_char_whitelist=0123456789?'
         text = pytesseract.image_to_string(img, config=config)
 
-
         if text:
             if result:
                 print("uh found multiple, rip.", repr(text), repr(result))
@@ -374,10 +370,7 @@ def parse_polygon(object_area, figure_filter):
     figure = grid[figure_filter]
     hull = scipy.spatial.ConvexHull(figure)
 
-    vertices = [
-        (figure[vertex, 0], figure[vertex, 1])
-        for vertex in hull.vertices
-    ]
+    vertices = [(figure[vertex, 0], figure[vertex, 1]) for vertex in hull.vertices]
     return simplify_polyon(vertices)
 
 
@@ -435,7 +428,7 @@ def get_tile_draw_color(tile):
 
 def draw_board(board, highlighted=None):
     fnt = PIL.ImageFont.truetype('/Library/Fonts/Arial Black.ttf', 40)
-    image = PIL.Image.new('RGB', (2400, 2160), (0,0,0))
+    image = PIL.Image.new('RGB', (2400, 2160), (0, 0, 0))
     pdraw = PIL.ImageDraw.Draw(image)
     for tile in board.tiles:
         color = get_tile_draw_color(tile)
@@ -450,7 +443,12 @@ def draw_board(board, highlighted=None):
                 color = (0xFF, 0, 0)
         pdraw.polygon(tile.polygon, fill=color)
         if tile.number is not None:
-            pdraw.text((tile.click_point[0] - 20, tile.click_point[1] - 20), str(tile.number), font=fnt, fill=(255,255,255))
+            pdraw.text(
+                (tile.click_point[0] - 20, tile.click_point[1] - 20),
+                str(tile.number),
+                font=fnt,
+                fill=(255, 255, 255),
+            )
 
     # # highlight vertices, for debug
     # for tile in board.tiles:
@@ -460,7 +458,6 @@ def draw_board(board, highlighted=None):
 
 
 def parse_board():
-    import PIL.ImageDraw
     image = PIL.Image.open('Capture.png')
     image = image.convert('RGB')
     array = numpy.array(image)
@@ -472,7 +469,7 @@ def parse_board():
         | (board_area[:, :, 2] != BACKGROUND_COLOR[2])
     )
     # `labeled` creates an array[x, y] = idx
-    labeled, num_objs = scipy.ndimage.label(mask)
+    labeled, _ = scipy.ndimage.label(mask)
     # visualize_labeled(labeled)
     object_areas = scipy.ndimage.find_objects(labeled)
 
@@ -487,10 +484,7 @@ def parse_board():
         tile: {tiles[idx - 1] for idx in adjacencies}
         for tile, adjacencies in adjacency_pointers.items()
     }
-    return Board.new(
-        tiles=tiles,
-        adjacencies=adjacencies,
-    )
+    return Board.new(tiles=tiles, adjacencies=adjacencies)
 
 
 def main():
