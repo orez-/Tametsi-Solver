@@ -8,7 +8,7 @@ import numpy
 import PIL.Image
 import PIL.ImageDraw
 import PIL.ImageFont
-import pytesseract
+import tesserocr
 import scipy.ndimage
 import scipy.spatial
 
@@ -17,6 +17,9 @@ BACKGROUND_COLOR = (0x14, 0x00, 0x23)
 COLORLESS_TILE_COLOR = (0x80, 0x80, 0x80)
 SAFE_TILE_COLOR = (0x33, 0x33, 0x33)
 FLAGGED_TILE_COLOR = (0xE6, 0xE6, 0xE6)
+
+tile_ocr = tesserocr.PyTessBaseAPI(psm=tesserocr.PSM.SINGLE_CHAR)
+tile_ocr.SetVariable("tessedit_char_whitelist", "0123456789?")
 
 
 def color_is_close(color1, color2):
@@ -346,8 +349,8 @@ def read_tile_number(image_slice):
         lum_mask = numpy.apply_along_axis(mask_only_white, 2, subslice)
 
         img = PIL.Image.fromarray(lum_mask.astype('uint8'), 'L')
-        config = '--psm 10 --oem 3 -c tessedit_char_whitelist=0123456789?'
-        text = pytesseract.image_to_string(img, config=config)
+        tile_ocr.SetImage(img)
+        text = tile_ocr.GetUTF8Text().strip()
 
         if text:
             if result:
