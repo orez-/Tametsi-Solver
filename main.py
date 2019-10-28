@@ -1,4 +1,5 @@
 import collections
+import itertools
 import enum
 import math
 
@@ -42,11 +43,11 @@ class TileState(enum.Enum):
 
 @attr.s(auto_attribs=True, eq=False)
 class Tile:
-    polygon: [(int, int)]
+    polygon: [(int, int)] = attr.ib(repr=False)
     color: (int, int, int)
     number: int
     tile_state: TileState
-    mask_area: []
+    mask_area: [] = attr.ib(repr=False)
 
     @classmethod
     def new(self, polygon, color, mask_area, number=None):
@@ -96,14 +97,31 @@ class Tile:
 class Constraint:
     min_mines: int
     max_mines: int
-    tiles: {Tile}
+
+    def merge(self, min_mines, max_mines=None):
+        """
+        Can accept `min_mines` and `max_mines`, or a single `constraint`.
+        """
+        if max_mines is None:
+            max_mines = min_mines.max_mines
+            min_mines = min_mines.min_mines
+        return Constraint(
+            min_mines=max(min_mines, self.min_mines),
+            max_mines=min(max_mines, self.max_mines),
+        )
+
+    def remove_mines(self, mines):
+        return Constraint(
+            min_mines=max(0, self.min_mines - mines),
+            max_mines=self.max_mines - mines,
+        )
 
 
 @attr.s(auto_attribs=True)
 class Board:
     tiles: {Tile}
     _adjacencies: {Tile: {Tile}}
-    constraints: [Constraint]
+    constraints: {(Tile,): Constraint}
 
     @classmethod
     def new(cls, tiles, adjacencies):
@@ -116,16 +134,96 @@ class Board:
         board.generate_constraints()
         return board
 
+    def tile_at_mouse(self, x, y):
+        for tile in self.tiles:
+            if is_point_in_polygon((x, y), tile.polygon):
+                return tile
+        return None
+
     def generate_constraints(self, color_count=None):
-        constraints = []
+        constraints = {}
         for tile, adjacencies in self._adjacencies.items():
             if tile.number is None:
                 continue
-            unsolved_neighbors = {adj_tile for adj_tile in adjacencies if adj_tile.is_unsolved}
-            constraints.append(
-                Constraint(min_mines=tile.number, max_mines=tile.number, tiles=unsolved_neighbors)
+            unsolved_neighbors = frozenset(
+                adj_tile for adj_tile in adjacencies if adj_tile.is_unsolved
             )
+            constraints[unsolved_neighbors] = Constraint(
+                min_mines=tile.number, max_mines=tile.number)
         self.constraints = constraints
+
+    def constraint_for(self, tiles):
+        tiles = frozenset(tiles)
+        if tiles not in self.constraints:
+            return Constraint(min_mines=0, max_mines=len(tiles))
+        return self.constraints[tiles]
+
+    def _apply_certainties(self):
+        newly_solved = {}
+        for tiles, constraint in self.constraints.items():
+            if constraint.max_mines == 0:
+                for tile in tiles:
+                    newly_solved[tile] = TileState.safe
+            elif constraint.min_mines == len(tiles):
+                for tile in tiles:
+                    newly_solved[tile] = TileState.flagged
+
+        for tile, state in newly_solved.items():
+            tile.tile_state = state
+
+        print(newly_solved)
+        new_constraints = {}
+        for tiles, constraint in self.constraints.items():
+            changed = newly_solved.keys() & tiles
+            if changed:
+                num_allocated = sum(1 for tile in changed if tile.is_flagged)
+                # subtracting dict keys demotes a frozenset to a set :(
+                tiles = frozenset(tiles - newly_solved.keys())
+                constraint = constraint.remove_mines(num_allocated)
+
+            merge_or_add(new_constraints, tiles, constraint)
+        new_constraints.pop(frozenset(), 0)
+        self.constraints = new_constraints
+
+    def _subdivide_overlapping_regions(self):
+        # examine overlapping regions
+        new_regions = {}
+        # compare each region to each other
+        combos = itertools.combinations(self.constraints.items(), 2)
+        for (tiles1, constr1), (tiles2, constr2) in combos:
+            overlap = frozenset(tiles1 & tiles2)
+            if not overlap:
+                continue
+
+            tiles1_exclusive = frozenset(tiles1 - overlap)
+            tiles2_exclusive = frozenset(tiles2 - overlap)
+            # find the upper and lower bounds for each that can fit in the overlap.
+            # commit as many as possible from both to the overlap
+            overlap_max = min(len(overlap), constr2.max_mines, constr1.max_mines)
+            # commit as few as possible, and fill them outside of the overlap first.
+            overlap_min = max(
+                constr2.min_mines - len(tiles2_exclusive),
+                constr1.min_mines - len(tiles1_exclusive),
+                0,
+            )
+            merge_or_add(new_regions, overlap, self.constraint_for(overlap).merge(overlap_min, overlap_max))
+            merge_or_add(new_regions, tiles1_exclusive, self.constraint_for(tiles1_exclusive).merge(
+                min_mines=constr1.min_mines - overlap_max,
+                max_mines=constr1.max_mines - overlap_min,
+            ))
+            merge_or_add(new_regions, tiles2_exclusive, self.constraint_for(tiles2_exclusive).merge(
+                min_mines=constr2.min_mines - overlap_max,
+                max_mines=constr2.max_mines - overlap_min,
+            ))
+        new_regions.pop(frozenset(), 0)
+        for tiles, constraint in new_regions.items():
+            merge_or_add(self.constraints, tiles, constraint)
+
+
+def merge_or_add(dict_, tiles, constraint):
+    if tiles in dict_:
+        constraint = dict_[tiles].merge(constraint)
+    dict_[tiles] = constraint
 
 
 def visualize_labeled(labeled):
@@ -215,11 +313,7 @@ def read_tile_number(image_slice):
     ]
     result = ""
 
-    # import random  # debug
-    # j = random.randint(0, 10000)  # debug
 
-    # img = PIL.Image.fromarray(original_slice.astype('uint8'), 'RGB')  # debug
-    # img.save(f"results/{j}_original.gif")  # debug
 
     for index, area in filtered_areas:
         # question mark is two strokes, god help me.
@@ -258,7 +352,6 @@ def read_tile_number(image_slice):
         config = '--psm 10 --oem 3 -c tessedit_char_whitelist=0123456789?'
         text = pytesseract.image_to_string(img, config=config)
 
-        # img.save(f"results/{j}_{index}_{text or 'unknown'}.gif")  # debug
 
         if text:
             if result:
@@ -266,7 +359,6 @@ def read_tile_number(image_slice):
                 return ""
             result = text
 
-    # print(j, result or "ᖍ(ツ)ᖌ")  # debug
     return result
 
 
@@ -295,6 +387,17 @@ def get_distance_from_line(p, p0, p1):
     return area * 2 / base_distance
 
 
+def determinant(p, p0, p1):
+    px, py = p
+    p0x, p0y = p0
+    p1x, p1y = p1
+    return (p1x - p0x) * (py - p0y) - (p1y - p0y) * (px - p0x)
+
+
+def is_point_in_polygon(p, vertices):
+    return len({determinant(p, p0, p1) > 0 for p0, p1 in zip(vertices, rotate(vertices, 1))}) == 1
+
+
 def get_triangle_area(vertices):
     (ax, ay), (bx, by), (cx, cy) = vertices
     return abs(ax * (by - cy) + bx * (cy - ay) + cx * (ay - by)) / 2
@@ -318,89 +421,8 @@ def rotate(list_, rotate_amt):
 
 
 def simplify_polyon(vertices):
+    # TODO: actually figure out how to simplify the polygon
     return vertices
-
-
-def debug_cleanup():
-    import os
-    import shutil
-    shutil.rmtree('results')
-    os.mkdir('results')
-
-# def simplify_polyon(vertices, ε=5):
-#     """
-#     Shave unnecessary vertices from polygon.
-
-#     https://en.wikipedia.org/wiki/Ramer%E2%80%93Douglas%E2%80%93Peucker_algorithm
-#     """
-#     if len(vertices) <= 2:
-#         return list(vertices)
-
-#     # Find the point with the maximum distance
-#     dmax, index = max(
-#         (get_distance_from_line(vert, vertices[0], vertices[-1]), i)
-#         for i, vert in enumerate(vertices[1:-1], 1)
-#     )
-
-#     # If max distance is greater than epsilon, recursively simplify
-#     # Otherwise, flatten the range.
-#     if dmax <= ε:
-#         return [vertices[0], vertices[-1]]
-
-#     results1 = simplify_polyon(vertices[:index + 1], ε)
-#     results2 = simplify_polyon(vertices[index:], ε)
-#     return results1[:-1] + results2
-
-
-# def simplify_polyon(vertices):
-#     """
-#     Combine line segments that are mostly colinear.
-#     """
-#     # # XXX this is an absurd amount of tolerance. We might want a better solution for this.
-#     # ε = math.pi / 5
-#     # # print("original", len(vertices))
-#     new_vertices = []
-#     triangle_iter = zip(vertices, rotate(vertices, 1), rotate(vertices, 2))
-#     for vertices in triangle_iter:
-#         if not is_short_triangle(vertices):
-#             (ax, ay), (bx, by), (cx, cy) = vertices
-#             new_vertices.append((bx, by))
-#     return new_vertices
-
-
-# def simplify_polyon(vertices):
-#     """
-#     Combine line segments that are mostly colinear.
-#     """
-#     # XXX this is an absurd amount of tolerance. We might want a better solution for this.
-#     ε = math.pi / 5
-#     # print("original", len(vertices))
-#     new_vertices = []
-#     line_segment_iter = zip(vertices + [vertices[0]], vertices[1:] + vertices[:2])
-#     # line_segment_iter = list(line_segment_iter)
-#     # print(line_segment_iter)
-#     (x0, y0), (x1, y1) = next(line_segment_iter)
-#     # last_angle = first_angle = math.atan2(y1 - y0, x1 - x0)
-
-#     # We skip setting the first vertex. We special case it at the end,
-#     # since we might want to omit it.
-#     for (x1, y1), (x2, y2) in line_segment_iter:
-#         # Compare
-#         current_angle = math.atan2(y2 - y1, x2 - x1)
-#         potential_angle = math.atan2(y2 - y0, x2 - x0)
-#         # print(angle)
-#         if not math.isclose(current_angle, potential_angle, abs_tol=ε):
-#             new_vertices.append((x1, y1))
-#             x0, y0 = x1, y1
-
-#     # current_angle = math.atan2(y2 - y1, x2 - x1)
-#     # potential_angle = math.atan2(y2 - y0, x2 - x0)
-#     # if not math.isclose(last_angle, first_angle, abs_tol=ε):
-#     #     new_vertices.append(vertices[0])
-
-#     # print("final", len(new_vertices), new_vertices)
-#     # assert len(new_vertices) <= 6, new_vertices
-#     return new_vertices
 
 
 def get_tile_draw_color(tile):
@@ -411,17 +433,20 @@ def get_tile_draw_color(tile):
     return tile.color
 
 
-def draw_board(board, i=None):
+def draw_board(board, highlighted=None):
     fnt = PIL.ImageFont.truetype('/Library/Fonts/Arial Black.ttf', 40)
     image = PIL.Image.new('RGB', (2400, 2160), (0,0,0))
     pdraw = PIL.ImageDraw.Draw(image)
     for tile in board.tiles:
         color = get_tile_draw_color(tile)
-        if i is not None:
-            focus, adj = list(board._adjacencies.items())[i]
+        if isinstance(highlighted, int):
+            focus, adj = list(board._adjacencies.items())[highlighted]
             if tile == focus:
                 color = (0, 0, 0xFF)
             if tile in adj:
+                color = (0xFF, 0, 0)
+        elif highlighted is not None:
+            if tile in highlighted:
                 color = (0xFF, 0, 0)
         pdraw.polygon(tile.polygon, fill=color)
         if tile.number is not None:
@@ -469,12 +494,11 @@ def parse_board():
 
 
 def main():
-    # debug_cleanup()  # debug
     board = parse_board()
+    for _ in range(5):
+        board._subdivide_overlapping_regions()
+        board._apply_certainties()
     draw_board(board).show()
-    # for i in range(100):
-    #     draw_board(board, i).show()
-    #     input()
 
 
 if __name__ == '__main__':
