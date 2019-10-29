@@ -1,4 +1,3 @@
-import collections
 import itertools
 import enum
 import math
@@ -8,9 +7,10 @@ import numpy
 import PIL.Image
 import PIL.ImageDraw
 import PIL.ImageFont
-import tesserocr
+import pyautogui
 import scipy.ndimage
 import scipy.spatial
+import tesserocr
 
 
 BACKGROUND_COLOR = (0x14, 0x00, 0x23)
@@ -52,9 +52,10 @@ class Tile:
     number: int
     tile_state: TileState
     mask_area: [] = attr.ib(repr=False)
+    box: (slice, slice) = attr.ib(repr=False)
 
     @classmethod
-    def new(cls, polygon, color, mask_area, number=None):
+    def new(cls, polygon, color, mask_area, box, number=None):
         state = TileState.unsolved
         if color == SAFE_TILE_COLOR:
             state = TileState.safe
@@ -63,7 +64,12 @@ class Tile:
             state = TileState.flagged
             color = None
         return cls(
-            polygon=polygon, color=color, number=number, tile_state=state, mask_area=mask_area
+            polygon=polygon,
+            color=color,
+            number=number,
+            tile_state=state,
+            mask_area=mask_area,
+            box=box,
         )
 
     @property
@@ -124,7 +130,7 @@ class Board:
     @classmethod
     def new(cls, tiles, adjacencies):
         tiles = list(tiles)
-        board = Board(tiles=tiles, adjacencies=adjacencies, constraints=[])
+        board = Board(tiles=tiles, adjacencies=adjacencies, constraints={})
         board.generate_constraints()
         return board
 
@@ -134,18 +140,17 @@ class Board:
                 return tile
         return None
 
+    def generate_adjacency_constraint(self, tile):
+        adjacencies = self._adjacencies[tile]
+        if tile.number is None:
+            return
+        unsolved_neighbors = frozenset(adj for adj in adjacencies if adj.is_unsolved)
+        constraint = Constraint(min_mines=tile.number, max_mines=tile.number)
+        merge_or_add(self.constraints, unsolved_neighbors, constraint)
+
     def generate_constraints(self, color_count=None):
-        constraints = {}
-        for tile, adjacencies in self._adjacencies.items():
-            if tile.number is None:
-                continue
-            unsolved_neighbors = frozenset(
-                adj_tile for adj_tile in adjacencies if adj_tile.is_unsolved
-            )
-            constraints[unsolved_neighbors] = Constraint(
-                min_mines=tile.number, max_mines=tile.number
-            )
-        self.constraints = constraints
+        for tile in self.tiles:
+            self.generate_adjacency_constraint(tile)
 
     def constraint_for(self, tiles):
         tiles = frozenset(tiles)
@@ -166,7 +171,6 @@ class Board:
         for tile, state in newly_solved.items():
             tile.tile_state = state
 
-        print(newly_solved)
         new_constraints = {}
         for tiles, constraint in self.constraints.items():
             changed = newly_solved.keys() & tiles
@@ -179,6 +183,21 @@ class Board:
             merge_or_add(new_constraints, tiles, constraint)
         new_constraints.pop(frozenset(), 0)
         self.constraints = new_constraints
+        self._drop_vacuous_constraints()
+        return newly_solved
+
+    def _drop_vacuous_constraints(self):
+        """
+        Drop constraints expressing no information.
+
+        ie, a constraint that states that x tiles contain between 0 and x mines.
+        Thanks constraint, good tip.
+        """
+        self.constraints = {
+            tiles: constraint
+            for tiles, constraint in self.constraints.items()
+            if not (constraint.min_mines == 0 and constraint.max_mines == len(tiles))
+        }
 
     def _subdivide_overlapping_regions(self):
         # examine overlapping regions
@@ -220,9 +239,9 @@ class Board:
                     max_mines=constr2.max_mines - overlap_min,
                 ),
             )
-        new_regions.pop(frozenset(), 0)
         for tiles, constraint in new_regions.items():
             merge_or_add(self.constraints, tiles, constraint)
+        self._drop_vacuous_constraints()
 
 
 def merge_or_add(dict_, tiles, constraint):
@@ -281,12 +300,12 @@ def parse_tile(image, labeled, object_area, index, color_set):
     adjacencies = fetch_adjacencies(labeled, object_area, index)
     number = None
     if color == SAFE_TILE_COLOR:
-        text = read_tile_number(image[object_area])
-        if text and text != '?':
-            number = int(text)
+        number = read_tile_number(image[object_area])
 
     return (
-        Tile.new(polygon=shape, color=color, number=number, mask_area=figure_filter),
+        Tile.new(
+            polygon=shape, color=color, number=number, mask_area=figure_filter, box=object_area
+        ),
         adjacencies,
     )
 
@@ -313,7 +332,7 @@ def read_tile_number(image_slice):
         # filter out weird aspect ratios
         and 0.25 <= (xs.stop - xs.start) / (ys.stop - ys.start) <= 0.7
     ]
-    result = ""
+    result = None
 
     for index, area in filtered_areas:
         # question mark is two strokes, god help me.
@@ -358,7 +377,17 @@ def read_tile_number(image_slice):
                 return ""
             result = text
 
-    return result
+    return int(result) if result and result != '?' else None
+
+
+def reparse_updated_tiles(board, updated_tiles, image):
+    for tile in updated_tiles:
+        tile.number = read_tile_number(image[tile.box])
+        if tile.number is not None:
+            board.generate_adjacency_constraint(tile)
+
+    # TODO: if we find a natural 0 it automatically expands.
+    # Here is a good place to start checking for that expansion.
 
 
 def parse_polygon(object_area, figure_filter):
@@ -463,8 +492,7 @@ def draw_board(board, highlighted=None):
     return image
 
 
-def parse_board():
-    image = PIL.Image.open('Capture.png')
+def parse_board(image):
     image = image.convert('RGB')
     array = numpy.array(image)
     board_area = array[:, 720:3120]
@@ -493,13 +521,34 @@ def parse_board():
     return Board.new(tiles=tiles, adjacencies=adjacencies)
 
 
-def main():
-    board = parse_board()
+def click_tiles(actions):
+    for tile, state in actions.items():
+        x, y = tile.click_point
+        button = 'left' if state == TileState.safe else 'right'
+        # TODO: yow
+        pyautogui.click(x=x + 720, y=y, button=button)
+
+
+def solve_live_game():
+    image = pyautogui.screenshot()
+    board = parse_board(image)
     for _ in range(5):
         board._subdivide_overlapping_regions()
-        board._apply_certainties()
+        results = board._apply_certainties()
+        if results:
+            click_tiles(results)
+            image = numpy.array(pyautogui.screenshot().convert('RGB'))
+            updated_tiles = [tile for tile, state in results.items() if state == TileState.safe]
+            reparse_updated_tiles(board, updated_tiles, image)
+
+
+def main():
+    board = parse_board(PIL.Image.open('Capture.png'))
+    for _ in range(5):
+        board._subdivide_overlapping_regions()
+        results = board._apply_certainties()
     draw_board(board).show()
 
 
 if __name__ == '__main__':
-    main()
+    solve_live_game()
