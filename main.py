@@ -183,20 +183,28 @@ class Board:
         for tile, state in newly_solved.items():
             tile.tile_state = state
 
+        self.remove_tiles_from_constraints(newly_solved.keys())
+        return newly_solved
+
+    def remove_tiles_from_constraints(self, newly_solved):
+        """
+        Remove the given tiles from all constraints.
+
+        Once a tile is solved it doesn't need to factor into the constraints.
+        This function applies the effect of these tiles on all current constraints.
+        """
         new_constraints = {}
         for tiles, constraint in self.constraints.items():
-            changed = newly_solved.keys() & tiles
+            changed = newly_solved & tiles
             if changed:
                 num_allocated = sum(1 for tile in changed if tile.is_flagged)
                 # subtracting dict keys demotes a frozenset to a set :(
-                tiles = frozenset(tiles - newly_solved.keys())
+                tiles = frozenset(tiles - newly_solved)
                 constraint = constraint.remove_mines(num_allocated)
 
             merge_or_add(new_constraints, tiles, constraint)
-        new_constraints.pop(frozenset(), 0)
         self.constraints = new_constraints
         self._drop_vacuous_constraints()
-        return newly_solved
 
     def _drop_vacuous_constraints(self):
         """
@@ -401,16 +409,19 @@ def reparse_updated_tiles(board, updated_tiles, image):
 
     # need to check the other tiles: if we find a natural 0 it automatically expands.
     # we could BFS off of `updated_tiles` to minimize lookups, but who cares
+    updated = set()
     for tile in board.tiles:
         if not tile.is_unsolved:
             continue
         tile_pixels = image[tile.box][tile.mask_area]
         color = parse_tile_color(tile_pixels, board.color_set)
         if color == Color.SAFE_TILE_COLOR:
+            updated.add(tile)
             tile.tile_state = TileState.safe
             tile.text = read_tile_number(image[tile.box])
             if tile.number is not None:
                 board.generate_adjacency_constraint(tile)
+    board.remove_tiles_from_constraints(updated)
 
 
 def parse_polygon(object_area, figure_filter):
