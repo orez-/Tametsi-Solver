@@ -319,10 +319,10 @@ def print_color(color, text=None):
 
 
 def expand_area(object_area, spacing):
-    xs, ys = object_area
+    ys, xs = object_area
     return (
-        slice(max(0, xs.start - spacing), xs.stop + spacing),
         slice(max(0, ys.start - spacing), ys.stop + spacing),
+        slice(max(0, xs.start - spacing), xs.stop + spacing),
     )
 
 

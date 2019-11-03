@@ -107,12 +107,12 @@ def assert_same_tile(tile1, tile2):
     # This is like bare-minimum reliability. It's very possible eg two
     # tiles as right triangles forming a square could have the same
     # bounding boxes. Let me know if you have a better idea x_x
-    xs1, ys1 = tile1.box
-    xs2, ys2 = tile2.box
-    assert abs(xs1.start - xs2.start) <= 1, (tile1.box, tile2.box)
-    assert abs(xs1.stop - xs2.stop) <= 1, (tile1.box, tile2.box)
+    ys1, xs1 = tile1.box
+    ys2, xs2 = tile2.box
     assert abs(ys1.start - ys2.start) <= 1, (tile1.box, tile2.box)
     assert abs(ys1.stop - ys2.stop) <= 1, (tile1.box, tile2.box)
+    assert abs(xs1.start - xs2.start) <= 1, (tile1.box, tile2.box)
+    assert abs(xs1.stop - xs2.stop) <= 1, (tile1.box, tile2.box)
 
 
 def serialize_tile(initial_tile, final_tile, final_board):
