@@ -45,9 +45,6 @@ class TileColorSet:
         return close_color
 
 
-empty_color_set = TileColorSet()
-
-
 class TileState(enum.Enum):
     flagged = 'flagged'
     safe = 'safe'
@@ -143,11 +140,18 @@ class Board:
     _adjacencies: {Tile: {Tile}}
     constraints: {(Tile,): Constraint}
     color_count: {Color: int}
+    color_set: TileColorSet
 
     @classmethod
-    def new(cls, tiles, adjacencies, color_count):
+    def new(cls, tiles, adjacencies, color_count, color_set):
         tiles = list(tiles)
-        board = Board(tiles=tiles, adjacencies=adjacencies, constraints={}, color_count=color_count)
+        board = Board(
+            tiles=tiles,
+            adjacencies=adjacencies,
+            constraints={},
+            color_count=color_count,
+            color_set=color_set,
+        )
         board.generate_constraints()
         return board
 
@@ -180,8 +184,7 @@ class Board:
             if color == Color.TEXT:
                 continue
             tiles = frozenset(
-                tile for tile in self.tiles
-                if tile.color == color and tile.is_unsolved
+                tile for tile in self.tiles if tile.color == color and tile.is_unsolved
             )
             constraint = Constraint(min_mines=count, max_mines=count)
             merge_or_add(self.constraints, tiles, constraint)
@@ -467,7 +470,7 @@ def reparse_updated_tiles(board, updated_tiles, image):
         if not tile.is_unsolved:
             continue
         tile_pixels = tile_area_pixels[tile.box][tile.mask_area]
-        color = parse_tile_color(tile_pixels, empty_color_set)
+        color = parse_tile_color(tile_pixels, board.color_set)
         if color == Color.SAFE_TILE:
             updated.add(tile)
             tile.tile_state = TileState.safe
@@ -618,7 +621,9 @@ def parse_color_count(pixels):
     # sewing individual digits together later.
     combined_areas = {}
     for i, (ys, xs) in enumerate(object_areas, 1):
-        key = ys.start, ys.stop
+        # Fuzz the key a little bit.
+        # This kinda sucks!
+        key = ys.start // 2 * 2, ys.stop // 2 * 2
         area = combined_areas.get(key)
         if area:
             area.add_slice(xs)
@@ -626,6 +631,7 @@ def parse_color_count(pixels):
             sub[sub == i] = area.index
         else:
             combined_areas[key] = ColorTextArea(index=i, xs=xs)
+    _validate_line_combos(combined_areas.keys())
 
     # Parse the text, and track the number associated with each color.
     # TODO: the corner-match icon shows up here too, gotta identify that.
@@ -644,6 +650,11 @@ def parse_color_count(pixels):
         color_count[color] = int(text)
 
     return color_count
+
+
+def _validate_line_combos(ys):
+    for (y1a, y1b), (y2a, y2b) in itertools.combinations(ys, r=2):
+        assert y1b < y2a or y2b < y1a, ((y1a, y1b), (y2a, y2b))
 
 
 def darken(color):
@@ -671,7 +682,9 @@ def parse_board(image):
         tile: {tiles[idx - 1] for idx in adjacencies}
         for tile, adjacencies in adjacency_pointers.items()
     }
-    return Board.new(tiles=tiles, adjacencies=adjacencies, color_count=color_count)
+    return Board.new(
+        tiles=tiles, adjacencies=adjacencies, color_count=color_count, color_set=color_set
+    )
 
 
 def click_tiles(actions):
