@@ -671,8 +671,6 @@ class BoardScreenshot:
 
 
 def solve_live_game():
-    print("alright, switch to the game now")
-    # time.sleep(3)
     image = pyautogui.screenshot()
     board = parse_board(image)
     board = solve(board)
@@ -706,4 +704,9 @@ def solve(board):
 
 
 if __name__ == '__main__':
-    solve_live_game()
+    try:
+        print("alright, switch to the game now")
+        time.sleep(3)
+        solve_live_game()
+    finally:
+        print("Done!\a")
