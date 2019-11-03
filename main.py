@@ -18,13 +18,15 @@ REVEALED_TILES_COUNT_DOWN = False
 COLUMN_HINTS_COUNT_DOWN = False
 
 tile_ocr = ocr.get_ocr_api(psm=10, char_whitelist="0123456789?")
+color_count_ocr = ocr.get_ocr_api(psm=8, char_whitelist="0123456789")
 
 
 class Color(tuple, enum.Enum):
-    BACKGROUND_COLOR = (0x14, 0x00, 0x23)
-    COLORLESS_TILE_COLOR = (0x80, 0x80, 0x80)
-    SAFE_TILE_COLOR = (0x33, 0x33, 0x33)
-    FLAGGED_TILE_COLOR = (0xE6, 0xE6, 0xE6)
+    BACKGROUND = (0x14, 0x00, 0x23)
+    COLORLESS_TILE = (0x80, 0x80, 0x80)
+    SAFE_TILE = (0x33, 0x33, 0x33)
+    FLAGGED_TILE = (0xE6, 0xE6, 0xE6)
+    TEXT = (0xFF, 0xFF, 0xFF)
 
 
 def color_is_close(color1, color2):
@@ -32,16 +34,18 @@ def color_is_close(color1, color2):
 
 
 class TileColorSet:
-    def __init__(self):
-        self.colors = [Color.COLORLESS_TILE_COLOR, Color.SAFE_TILE_COLOR, Color.FLAGGED_TILE_COLOR]
+    def __init__(self, colors=()):
+        self.colors = [Color.COLORLESS_TILE, Color.SAFE_TILE, Color.FLAGGED_TILE, *colors]
 
     def get_color(self, color):
-        for known_color in self.colors:
-            if color_is_close(color, known_color):
-                return known_color
-        color = tuple(map(int, color))
-        self.colors.append(color)
-        return color
+        _, close_color = min(
+            (sum(abs(a - b) for a, b in zip(color, known_color)), known_color)
+            for known_color in self.colors
+        )
+        return close_color
+
+
+empty_color_set = TileColorSet()
 
 
 class TileState(enum.Enum):
@@ -62,10 +66,10 @@ class Tile:
     @classmethod
     def new(cls, *, polygon, color, mask_area, box, text=None):
         state = TileState.unsolved
-        if color == Color.SAFE_TILE_COLOR:
+        if color == Color.SAFE_TILE:
             state = TileState.safe
             color = None
-        elif color == Color.FLAGGED_TILE_COLOR:
+        elif color == Color.FLAGGED_TILE:
             state = TileState.flagged
             color = None
         return cls(
@@ -131,12 +135,12 @@ class Board:
     tiles: [Tile]
     _adjacencies: {Tile: {Tile}}
     constraints: {(Tile,): Constraint}
-    color_set: "ColorSet"
+    color_count: {Color: int}
 
     @classmethod
-    def new(cls, tiles, adjacencies, color_set):
+    def new(cls, tiles, adjacencies, color_count):
         tiles = list(tiles)
-        board = Board(tiles=tiles, adjacencies=adjacencies, constraints={}, color_set=color_set)
+        board = Board(tiles=tiles, adjacencies=adjacencies, constraints={}, color_count=color_count)
         board.generate_constraints()
         return board
 
@@ -160,9 +164,26 @@ class Board:
         constraint = Constraint(min_mines=number, max_mines=number)
         merge_or_add(self.constraints, unsolved_neighbors, constraint)
 
-    def generate_constraints(self, color_count=None):
+    def generate_constraints(self):
         for tile in self.tiles:
             self.generate_adjacency_constraint(tile)
+
+    def generate_color_constraints(self):
+        for color, count in self.get_remaining_color_count().items():
+            if color == Color.TEXT:
+                continue
+            tiles = frozenset(
+                tile for tile in self.tiles
+                if tile.color == color and tile.is_unsolved
+            )
+            constraint = Constraint(min_mines=count, max_mines=count)
+            merge_or_add(self.constraints, tiles, constraint)
+
+    def generate_total_tile_constraint(self):
+        count = self.get_remaining_color_count()[Color.TEXT]
+        tiles = frozenset(tile for tile in self.tiles if tile.is_unsolved)
+        constraint = Constraint(min_mines=count, max_mines=count)
+        merge_or_add(self.constraints, tiles, constraint)
 
     def constraint_for(self, tiles):
         tiles = frozenset(tiles)
@@ -263,6 +284,17 @@ class Board:
             merge_or_add(self.constraints, tiles, constraint)
         self._drop_vacuous_constraints()
 
+    def get_remaining_color_count(self):
+        remaining = {}
+        flagged = {tile for tile in self.tiles if tile.is_flagged}
+        for color, count in self.color_count.items():
+            if color == Color.TEXT:
+                remaining[color] = count - len(flagged)
+            else:
+                remaining[color] = count - sum(1 for tile in flagged if tile.color == color)
+            assert remaining[color] >= 0, remaining[color]
+        return remaining
+
 
 def merge_or_add(dict_, tiles, constraint):
     if tiles in dict_:
@@ -302,11 +334,6 @@ def fetch_adjacencies(labeled, object_area, object_index, spacing=15):
     return result
 
 
-def mask_only_white(array):
-    lum = round(sum(array) / 3)
-    return 255 - (lum if lum > 240 else 0)
-
-
 def parse_tile_color(tile_pixels, color_set):
     color = numpy.median(tile_pixels, axis=0)
     return color_set.get_color(color)
@@ -323,7 +350,7 @@ def parse_tile(image, labeled, object_area, index, color_set):
     shape = parse_polygon(object_area, figure_filter)
     adjacencies = fetch_adjacencies(labeled, object_area, index)
     text = None
-    if color == Color.SAFE_TILE_COLOR:
+    if color == Color.SAFE_TILE:
         text = read_tile_number(image[object_area])
 
     return (
@@ -382,14 +409,7 @@ def read_tile_number(image_slice):
             labeled[labeled == dot_index] = index
 
         # Ok here's the meat.
-        area = expand_area(area, 3)
-        subslice = numpy.copy(image_slice[area])
-        # blank everything that's not our character
-        subslice[labeled[area] != index] = [0, 0, 0]
-
-        lum_mask = numpy.apply_along_axis(mask_only_white, 2, subslice)
-
-        img = PIL.Image.fromarray(lum_mask.astype('uint8'), 'L')
+        img = isolate_label(labeled, index, area)
         text = tile_ocr.image_to_string(img)
 
         if text:
@@ -415,8 +435,8 @@ def reparse_updated_tiles(board, updated_tiles, image):
         if not tile.is_unsolved:
             continue
         tile_pixels = tile_area_pixels[tile.box][tile.mask_area]
-        color = parse_tile_color(tile_pixels, board.color_set)
-        if color == Color.SAFE_TILE_COLOR:
+        color = parse_tile_color(tile_pixels, empty_color_set)
+        if color == Color.SAFE_TILE:
             updated.add(tile)
             tile.tile_state = TileState.safe
             tile.text = read_tile_number(tile_area_pixels[tile.box])
@@ -487,15 +507,15 @@ def simplify_polygon(vertices):
 
 def get_tile_draw_color(tile):
     if tile.is_flagged:
-        return Color.FLAGGED_TILE_COLOR
+        return Color.FLAGGED_TILE
     if tile.is_safe:
-        return Color.SAFE_TILE_COLOR
+        return Color.SAFE_TILE
     return tile.color
 
 
 def draw_board(board, highlighted=None):
     font = get_font()
-    image = PIL.Image.new('RGB', (2400, 2160), (0, 0, 0))
+    image = PIL.Image.new('RGB', (2400, 2160), Color.BACKGROUND)
     pdraw = PIL.ImageDraw.Draw(image)
     for tile in board.tiles:
         color = get_tile_draw_color(tile)
@@ -538,20 +558,85 @@ def get_font():
     raise RuntimeError("couldn't load a font")
 
 
+@attr.s(auto_attribs=True)
+class ColorTextArea:
+    index: int
+    xs: slice
+
+    def add_slice(self, xs):
+        self.xs = slice(
+            min(self.xs.start, xs.start),
+            max(self.xs.stop, xs.stop),
+        )
+
+
+def isolate_label(labeled, index, area):
+    """
+    Convert the labeled area of an array of pixels to an image primed for OCR.
+
+    This means converting the labeled area to black and everything else to white,
+    and adding a little padding to the edges.
+    """
+    area = expand_area(area, 3)
+    # Why can't we just use the mask with PIL mode "1"?
+    # Because PIL is an endless nightmare, that's why.
+    formatted = (labeled[area] != index) * 0xFF
+    return PIL.Image.fromarray(formatted.astype("uint8"), 'L')
+
+
+def parse_color_count(pixels):
+    mask = numpy.any(pixels != Color.BACKGROUND, axis=-1)
+    labeled, _ = scipy.ndimage.label(mask)
+    object_areas = scipy.ndimage.find_objects(labeled)
+
+    # Combine labels with the same vertical positioning.
+    # This will let us read the entire line at once, instead of
+    # sewing individual digits together later.
+    combined_areas = {}
+    for i, (ys, xs) in enumerate(object_areas, 1):
+        key = ys.start, ys.stop
+        area = combined_areas.get(key)
+        if area:
+            area.add_slice(xs)
+            sub = labeled[ys, xs]
+            sub[sub == i] = area.index
+        else:
+            combined_areas[key] = ColorTextArea(index=i, xs=xs)
+
+    # Parse the text, and track the number associated with each color.
+    # TODO: the corner-match icon shows up here too, gotta identify that.
+    color_count = {}
+    for ys, color_area in combined_areas.items():
+        area = slice(*ys), color_area.xs
+        img = isolate_label(labeled, color_area.index, area)
+        text = color_count_ocr.image_to_string(img)
+
+        color = numpy.median(pixels[area][labeled[area] == color_area.index], axis=0)
+        if color_is_close(color, Color.TEXT):
+            color = Color.TEXT
+        else:
+            # Text color is brighter than tile color
+            color = darken(color)
+        color_count[color] = int(text)
+
+    return color_count
+
+
+def darken(color):
+    return tuple(int(round(component / 1.5)) for component in color)
+
+
 def parse_board(image):
     board_screenshot = BoardScreenshot(image)
+    color_count = parse_color_count(board_screenshot.color_count_area_pixels())
     tile_area_pixels = board_screenshot.tile_area_pixels()
-    mask = (
-        (tile_area_pixels[:, :, 0] != Color.BACKGROUND_COLOR[0])
-        | (tile_area_pixels[:, :, 1] != Color.BACKGROUND_COLOR[1])
-        | (tile_area_pixels[:, :, 2] != Color.BACKGROUND_COLOR[2])
-    )
+    mask = numpy.any(tile_area_pixels != Color.BACKGROUND, axis=-1)
     # `labeled` creates an array[x, y] = idx
     labeled, _ = scipy.ndimage.label(mask)
     # visualize_labeled(labeled)
     object_areas = scipy.ndimage.find_objects(labeled)
 
-    color_set = TileColorSet()
+    color_set = TileColorSet(color_count.keys() - {Color.TEXT})
     adjacency_pointers = dict(
         parse_tile(tile_area_pixels, labeled, object_area, index, color_set)
         for index, object_area in enumerate(object_areas, 1)
@@ -562,7 +647,7 @@ def parse_board(image):
         tile: {tiles[idx - 1] for idx in adjacencies}
         for tile, adjacencies in adjacency_pointers.items()
     }
-    return Board.new(tiles=tiles, adjacencies=adjacencies, color_set=color_set)
+    return Board.new(tiles=tiles, adjacencies=adjacencies, color_count=color_count)
 
 
 def click_tiles(actions):
@@ -576,17 +661,36 @@ def click_tiles(actions):
 class BoardScreenshot:
     def __init__(self, image):
         image = image.convert('RGB')
-        self._array = numpy.array(image)
+        self._array = numpy.array(image, dtype='uint8')
 
     def tile_area_pixels(self):
         return self._array[:, 720:3120]
 
+    def color_count_area_pixels(self):
+        return self._array[:1080, 3600:]
+
 
 def solve_live_game():
     print("alright, switch to the game now")
-    time.sleep(3)
+    # time.sleep(3)
     image = pyautogui.screenshot()
     board = parse_board(image)
+    board = solve(board)
+    # We delay adding in the color constraints until we've solved everything else we can,
+    # because it turns out having the color constraints doesn't tend to be useful until
+    # later in the game! In fact, it ends up slowing down the solver a LOT to add these too early.
+    print("generating color constraints")
+    board.generate_color_constraints()
+    board = solve(board)
+    # Same deal as above but moreso: don't add the constraint over EVERY tile
+    # until we're really out of options.
+    print("generating total tile constraint")
+    board.generate_total_tile_constraint()
+    board = solve(board)
+    return board
+
+
+def solve(board):
     i = 100
     while i > 0:
         i -= 1
