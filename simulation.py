@@ -137,10 +137,8 @@ def serialize_tiles(path):
     import main
 
     test_dir = pathlib.Path("tests") / path
-    blank_img = main.get_board_area(PIL.Image.open(test_dir / 'blank.png'))
-    blank_board = main.parse_board(blank_img)
-    final_img = main.get_board_area(PIL.Image.open(test_dir / 'final.png'))
-    final_board = main.parse_board(final_img)
+    blank_board = main.parse_board(PIL.Image.open(test_dir / 'blank.png'))
+    final_board = main.parse_board(PIL.Image.open(test_dir / 'final.png'))
 
     # This is an absurdly rough match up, but I'm not sure how to improve accuracy confidence :#
     tiles = [

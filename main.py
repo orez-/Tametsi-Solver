@@ -402,8 +402,9 @@ def read_tile_number(image_slice):
 
 
 def reparse_updated_tiles(board, updated_tiles, image):
+    tile_area_pixels = BoardScreenshot(image).tile_area_pixels()
     for tile in updated_tiles:
-        tile.text = read_tile_number(image[tile.box])
+        tile.text = read_tile_number(tile_area_pixels[tile.box])
         if tile.number is not None:
             board.generate_adjacency_constraint(tile)
 
@@ -413,12 +414,12 @@ def reparse_updated_tiles(board, updated_tiles, image):
     for tile in board.tiles:
         if not tile.is_unsolved:
             continue
-        tile_pixels = image[tile.box][tile.mask_area]
+        tile_pixels = tile_area_pixels[tile.box][tile.mask_area]
         color = parse_tile_color(tile_pixels, board.color_set)
         if color == Color.SAFE_TILE_COLOR:
             updated.add(tile)
             tile.tile_state = TileState.safe
-            tile.text = read_tile_number(image[tile.box])
+            tile.text = read_tile_number(tile_area_pixels[tile.box])
             if tile.number is not None:
                 board.generate_adjacency_constraint(tile)
     board.remove_tiles_from_constraints(updated)
@@ -538,10 +539,12 @@ def get_font():
 
 
 def parse_board(image):
+    board_screenshot = BoardScreenshot(image)
+    tile_area_pixels = board_screenshot.tile_area_pixels()
     mask = (
-        (image[:, :, 0] != Color.BACKGROUND_COLOR[0])
-        | (image[:, :, 1] != Color.BACKGROUND_COLOR[1])
-        | (image[:, :, 2] != Color.BACKGROUND_COLOR[2])
+        (tile_area_pixels[:, :, 0] != Color.BACKGROUND_COLOR[0])
+        | (tile_area_pixels[:, :, 1] != Color.BACKGROUND_COLOR[1])
+        | (tile_area_pixels[:, :, 2] != Color.BACKGROUND_COLOR[2])
     )
     # `labeled` creates an array[x, y] = idx
     labeled, _ = scipy.ndimage.label(mask)
@@ -550,7 +553,7 @@ def parse_board(image):
 
     color_set = TileColorSet()
     adjacency_pointers = dict(
-        parse_tile(image, labeled, object_area, index, color_set)
+        parse_tile(tile_area_pixels, labeled, object_area, index, color_set)
         for index, object_area in enumerate(object_areas, 1)
     )
     tiles = list(adjacency_pointers)
@@ -570,21 +573,19 @@ def click_tiles(actions):
         pyautogui.click(x=x + 720, y=y, button=button)
 
 
-def get_board_screenshot():
-    image = pyautogui.screenshot()
-    return get_board_area(image)
+class BoardScreenshot:
+    def __init__(self, image):
+        image = image.convert('RGB')
+        self._array = numpy.array(image)
 
-
-def get_board_area(image):
-    image = image.convert('RGB')
-    array = numpy.array(image)
-    return array[:, 720:3120]
+    def tile_area_pixels(self):
+        return self._array[:, 720:3120]
 
 
 def solve_live_game():
     print("alright, switch to the game now")
     time.sleep(3)
-    image = get_board_screenshot()
+    image = pyautogui.screenshot()
     board = parse_board(image)
     i = 100
     while i > 0:
@@ -593,7 +594,7 @@ def solve_live_game():
         results = board._apply_certainties()
         if results:
             click_tiles(results)
-            image = get_board_screenshot()
+            image = pyautogui.screenshot()
             updated_tiles = [tile for tile, state in results.items() if state == TileState.safe]
             reparse_updated_tiles(board, updated_tiles, image)
             i = 100
