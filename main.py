@@ -482,7 +482,7 @@ def get_tile_draw_color(tile):
 
 
 def draw_board(board, highlighted=None):
-    fnt = PIL.ImageFont.truetype('/Library/Fonts/Arial Black.ttf', 40)
+    font = get_font()
     image = PIL.Image.new('RGB', (2400, 2160), (0, 0, 0))
     pdraw = PIL.ImageDraw.Draw(image)
     for tile in board.tiles:
@@ -505,7 +505,7 @@ def draw_board(board, highlighted=None):
             pdraw.text(
                 (tile.click_point[0] - 20, tile.click_point[1] - 20),
                 tile.text,
-                font=fnt,
+                font=font,
                 fill=(255, 255, 255),
             )
 
@@ -514,6 +514,16 @@ def draw_board(board, highlighted=None):
     #     for vertex in tile.polygon:
     #         pdraw.ellipse([vertex[0] - 3, vertex[1] - 3, vertex[0] + 3, vertex[1] + 3], fill=(0xFF, 0, 0))
     return image
+
+
+def get_font():
+    font_files = ['Arial.ttf', 'arial.ttf']
+    for name in font_files:
+        try:
+            return PIL.ImageFont.truetype(name, 40)
+        except OSError:
+            pass
+    raise RuntimeError("couldn't load a font")
 
 
 def parse_board(image):
