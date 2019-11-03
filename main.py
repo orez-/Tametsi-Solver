@@ -341,9 +341,34 @@ def fetch_adjacencies(labeled, object_area, object_index, spacing=15):
     return result
 
 
+def most_common(array, num, axis):
+    colors, counts = numpy.unique(array, return_counts=True, axis=axis)
+    # Get the indexes of the highest counts, unordered
+    most_indexes = numpy.argpartition(counts, -num)[-num:]
+    # Sort the indexes of the highest counts by count desc.
+    most_indexes = most_indexes[numpy.argsort(counts[most_indexes])][::-1]
+    return [(colors[index], counts[index]) for index in most_indexes]
+
+
 def parse_tile_color(tile_pixels, color_set):
-    color = numpy.median(tile_pixels, axis=0)
-    return color_set.get_color(color)
+    (color1, count1), (color2, count2) = most_common(tile_pixels, 2, axis=0)
+    color1 = color_set.get_color(color1)
+    color2 = color_set.get_color(color2)
+    if color1 == color2 or count1 > count2 * 1.5:
+        return color1
+
+    # Our top two most common colors have a similar count. Just taking `color1`
+    # might give the wrong answer! Instead, always prefer SAFE_TILE, then FLAGGED_TILE.
+    # If we've got two rando colors here, the most common one is fine.
+
+    # This is especially a problem with FLAGGED_TILE: colored tiles that are flagged retain
+    # a pretty thick border of their color, which for some smaller shapes can cause
+    # that color to be the more common of the two.
+    if Color.SAFE_TILE in [color1, color2]:
+        return Color.SAFE_TILE
+    if Color.FLAGGED_TILE in [color1, color2]:
+        return Color.FLAGGED_TILE
+    return color1
 
 
 def parse_tile(image, labeled, object_area, index, color_set):
