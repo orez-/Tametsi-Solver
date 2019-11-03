@@ -426,7 +426,7 @@ def parse_polygon(object_area, figure_filter):
     hull = scipy.spatial.ConvexHull(figure)
 
     vertices = [(figure[vertex, 0], figure[vertex, 1]) for vertex in hull.vertices]
-    return simplify_polyon(vertices)
+    return simplify_polygon(vertices)
 
 
 def get_distance_from_line(p, p0, p1):
@@ -468,7 +468,7 @@ def rotate(list_, rotate_amt):
     return list_[rotate_amt:] + list_[:rotate_amt]
 
 
-def simplify_polyon(vertices):
+def simplify_polygon(vertices):
     # TODO: actually figure out how to simplify the polygon
     return vertices
 
