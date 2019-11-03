@@ -1,6 +1,7 @@
 import itertools
 import enum
 import math
+import time
 
 import attr
 import numpy
@@ -10,16 +11,20 @@ import PIL.ImageFont
 import pyautogui
 import scipy.ndimage
 import scipy.spatial
-import tesserocr
+
+import ocr
+
+REVEALED_TILES_COUNT_DOWN = False
+COLUMN_HINTS_COUNT_DOWN = False
+
+tile_ocr = ocr.get_ocr_api(psm=10, char_whitelist="0123456789?")
 
 
-BACKGROUND_COLOR = (0x14, 0x00, 0x23)
-COLORLESS_TILE_COLOR = (0x80, 0x80, 0x80)
-SAFE_TILE_COLOR = (0x33, 0x33, 0x33)
-FLAGGED_TILE_COLOR = (0xE6, 0xE6, 0xE6)
-
-tile_ocr = tesserocr.PyTessBaseAPI(psm=tesserocr.PSM.SINGLE_CHAR)
-tile_ocr.SetVariable("tessedit_char_whitelist", "0123456789?")
+class Color(tuple, enum.Enum):
+    BACKGROUND_COLOR = (0x14, 0x00, 0x23)
+    COLORLESS_TILE_COLOR = (0x80, 0x80, 0x80)
+    SAFE_TILE_COLOR = (0x33, 0x33, 0x33)
+    FLAGGED_TILE_COLOR = (0xE6, 0xE6, 0xE6)
 
 
 def color_is_close(color1, color2):
@@ -28,7 +33,7 @@ def color_is_close(color1, color2):
 
 class TileColorSet:
     def __init__(self):
-        self.colors = [COLORLESS_TILE_COLOR, SAFE_TILE_COLOR, FLAGGED_TILE_COLOR]
+        self.colors = [Color.COLORLESS_TILE_COLOR, Color.SAFE_TILE_COLOR, Color.FLAGGED_TILE_COLOR]
 
     def get_color(self, color):
         for known_color in self.colors:
@@ -49,27 +54,22 @@ class TileState(enum.Enum):
 class Tile:
     polygon: [(int, int)] = attr.ib(repr=False)
     color: (int, int, int)
-    number: int
+    text: str
     tile_state: TileState
     mask_area: [] = attr.ib(repr=False)
     box: (slice, slice) = attr.ib(repr=False)
 
     @classmethod
-    def new(cls, polygon, color, mask_area, box, number=None):
+    def new(cls, *, polygon, color, mask_area, box, text=None):
         state = TileState.unsolved
-        if color == SAFE_TILE_COLOR:
+        if color == Color.SAFE_TILE_COLOR:
             state = TileState.safe
             color = None
-        elif color == FLAGGED_TILE_COLOR:
+        elif color == Color.FLAGGED_TILE_COLOR:
             state = TileState.flagged
             color = None
         return cls(
-            polygon=polygon,
-            color=color,
-            number=number,
-            tile_state=state,
-            mask_area=mask_area,
-            box=box,
+            polygon=polygon, color=color, text=text, tile_state=state, mask_area=mask_area, box=box
         )
 
     @property
@@ -98,6 +98,10 @@ class Tile:
     def is_unsolved(self):
         return self.tile_state == TileState.unsolved
 
+    @property
+    def number(self):
+        return int(self.text) if self.text and self.text != "?" else None
+
 
 @attr.s(auto_attribs=True)
 class Constraint:
@@ -123,14 +127,16 @@ class Constraint:
 
 @attr.s(auto_attribs=True)
 class Board:
-    tiles: {Tile}
+    # The simulator currently (unfortunately) relies on this being an ordered list
+    tiles: [Tile]
     _adjacencies: {Tile: {Tile}}
     constraints: {(Tile,): Constraint}
+    color_set: "ColorSet"
 
     @classmethod
-    def new(cls, tiles, adjacencies):
+    def new(cls, tiles, adjacencies, color_set):
         tiles = list(tiles)
-        board = Board(tiles=tiles, adjacencies=adjacencies, constraints={})
+        board = Board(tiles=tiles, adjacencies=adjacencies, constraints={}, color_set=color_set)
         board.generate_constraints()
         return board
 
@@ -141,11 +147,17 @@ class Board:
         return None
 
     def generate_adjacency_constraint(self, tile):
-        adjacencies = self._adjacencies[tile]
-        if tile.number is None:
+        number = tile.number
+        if number is None:
             return
+        adjacencies = self._adjacencies[tile]
+        # Have to decide how to interpret this number. If revealed tiles
+        # do NOT count down, we need to drop the number of adjacent flags
+        # from our constraint.
+        if not REVEALED_TILES_COUNT_DOWN:
+            number -= sum(1 for adj in adjacencies if adj.is_flagged)
         unsolved_neighbors = frozenset(adj for adj in adjacencies if adj.is_unsolved)
-        constraint = Constraint(min_mines=tile.number, max_mines=tile.number)
+        constraint = Constraint(min_mines=number, max_mines=number)
         merge_or_add(self.constraints, unsolved_neighbors, constraint)
 
     def generate_constraints(self, color_count=None):
@@ -287,25 +299,27 @@ def mask_only_white(array):
     return 255 - (lum if lum > 240 else 0)
 
 
+def parse_tile_color(tile_pixels, color_set):
+    color = numpy.median(tile_pixels, axis=0)
+    return color_set.get_color(color)
+
+
 def parse_tile(image, labeled, object_area, index, color_set):
     # limit both large arrays to just the area we care about,
     # then fetch the array of only the pixel values that are labeled with our index.
     # tile_pixels[i] = [r, g, b]
     figure_filter = labeled[object_area] == index
     tile_pixels = image[object_area][figure_filter]
-    color = numpy.median(tile_pixels, axis=0)
-    color = color_set.get_color(color)
+    color = parse_tile_color(tile_pixels, color_set)
 
     shape = parse_polygon(object_area, figure_filter)
     adjacencies = fetch_adjacencies(labeled, object_area, index)
-    number = None
-    if color == SAFE_TILE_COLOR:
-        number = read_tile_number(image[object_area])
+    text = None
+    if color == Color.SAFE_TILE_COLOR:
+        text = read_tile_number(image[object_area])
 
     return (
-        Tile.new(
-            polygon=shape, color=color, number=number, mask_area=figure_filter, box=object_area
-        ),
+        Tile.new(polygon=shape, color=color, text=text, mask_area=figure_filter, box=object_area),
         adjacencies,
     )
 
@@ -319,8 +333,8 @@ def read_tile_number(image_slice):
     """
     mask = (
         (image_slice[:, :, 0] > 240)
-        | (image_slice[:, :, 1] > 240)
-        | (image_slice[:, :, 2] > 240)
+        & (image_slice[:, :, 1] > 240)
+        & (image_slice[:, :, 2] > 240)
     )
     labeled, _ = scipy.ndimage.label(mask)
     object_areas = scipy.ndimage.find_objects(labeled)
@@ -368,8 +382,7 @@ def read_tile_number(image_slice):
         lum_mask = numpy.apply_along_axis(mask_only_white, 2, subslice)
 
         img = PIL.Image.fromarray(lum_mask.astype('uint8'), 'L')
-        tile_ocr.SetImage(img)
-        text = tile_ocr.GetUTF8Text().strip()
+        text = tile_ocr.image_to_string(img)
 
         if text:
             if result:
@@ -377,17 +390,27 @@ def read_tile_number(image_slice):
                 return ""
             result = text
 
-    return int(result) if result and result != '?' else None
+    return result or None
 
 
 def reparse_updated_tiles(board, updated_tiles, image):
     for tile in updated_tiles:
-        tile.number = read_tile_number(image[tile.box])
+        tile.text = read_tile_number(image[tile.box])
         if tile.number is not None:
             board.generate_adjacency_constraint(tile)
 
-    # TODO: if we find a natural 0 it automatically expands.
-    # Here is a good place to start checking for that expansion.
+    # need to check the other tiles: if we find a natural 0 it automatically expands.
+    # we could BFS off of `updated_tiles` to minimize lookups, but who cares
+    for tile in board.tiles:
+        if not tile.is_unsolved:
+            continue
+        tile_pixels = image[tile.box][tile.mask_area]
+        color = parse_tile_color(tile_pixels, board.color_set)
+        if color == Color.SAFE_TILE_COLOR:
+            tile.tile_state = TileState.safe
+            tile.text = read_tile_number(image[tile.box])
+            if tile.number is not None:
+                board.generate_adjacency_constraint(tile)
 
 
 def parse_polygon(object_area, figure_filter):
@@ -452,9 +475,9 @@ def simplify_polyon(vertices):
 
 def get_tile_draw_color(tile):
     if tile.is_flagged:
-        return FLAGGED_TILE_COLOR
+        return Color.FLAGGED_TILE_COLOR
     if tile.is_safe:
-        return SAFE_TILE_COLOR
+        return Color.SAFE_TILE_COLOR
     return tile.color
 
 
@@ -468,7 +491,8 @@ def draw_board(board, highlighted=None):
             if isinstance(highlighted, int):
                 focus, adj = list(board._adjacencies.items())[highlighted]
             else:
-                focus, adj = board._adjacencies[highlighted]
+                focus = highlighted
+                adj = board._adjacencies[highlighted]
             if tile == focus:
                 color = (0, 0, 0xFF)
             if tile in adj:
@@ -477,10 +501,10 @@ def draw_board(board, highlighted=None):
             if tile in highlighted:
                 color = (0xFF, 0, 0)
         pdraw.polygon(tile.polygon, fill=color)
-        if tile.number is not None:
+        if tile.text:
             pdraw.text(
                 (tile.click_point[0] - 20, tile.click_point[1] - 20),
-                str(tile.number),
+                tile.text,
                 font=fnt,
                 fill=(255, 255, 255),
             )
@@ -493,14 +517,10 @@ def draw_board(board, highlighted=None):
 
 
 def parse_board(image):
-    image = image.convert('RGB')
-    array = numpy.array(image)
-    board_area = array[:, 720:3120]
-
     mask = (
-        (board_area[:, :, 0] != BACKGROUND_COLOR[0])
-        | (board_area[:, :, 1] != BACKGROUND_COLOR[1])
-        | (board_area[:, :, 2] != BACKGROUND_COLOR[2])
+        (image[:, :, 0] != Color.BACKGROUND_COLOR[0])
+        | (image[:, :, 1] != Color.BACKGROUND_COLOR[1])
+        | (image[:, :, 2] != Color.BACKGROUND_COLOR[2])
     )
     # `labeled` creates an array[x, y] = idx
     labeled, _ = scipy.ndimage.label(mask)
@@ -509,7 +529,7 @@ def parse_board(image):
 
     color_set = TileColorSet()
     adjacency_pointers = dict(
-        parse_tile(board_area, labeled, object_area, index, color_set)
+        parse_tile(image, labeled, object_area, index, color_set)
         for index, object_area in enumerate(object_areas, 1)
     )
     tiles = list(adjacency_pointers)
@@ -518,7 +538,7 @@ def parse_board(image):
         tile: {tiles[idx - 1] for idx in adjacencies}
         for tile, adjacencies in adjacency_pointers.items()
     }
-    return Board.new(tiles=tiles, adjacencies=adjacencies)
+    return Board.new(tiles=tiles, adjacencies=adjacencies, color_set=color_set)
 
 
 def click_tiles(actions):
@@ -529,25 +549,34 @@ def click_tiles(actions):
         pyautogui.click(x=x + 720, y=y, button=button)
 
 
-def solve_live_game():
+def get_board_screenshot():
     image = pyautogui.screenshot()
+    return get_board_area(image)
+
+
+def get_board_area(image):
+    image = image.convert('RGB')
+    array = numpy.array(image)
+    return array[:, 720:3120]
+
+
+def solve_live_game():
+    print("alright, switch to the game now")
+    time.sleep(3)
+    image = get_board_screenshot()
     board = parse_board(image)
-    for _ in range(5):
+    i = 100
+    while i > 0:
+        i -= 1
         board._subdivide_overlapping_regions()
         results = board._apply_certainties()
         if results:
             click_tiles(results)
-            image = numpy.array(pyautogui.screenshot().convert('RGB'))
+            image = get_board_screenshot()
             updated_tiles = [tile for tile, state in results.items() if state == TileState.safe]
             reparse_updated_tiles(board, updated_tiles, image)
-
-
-def main():
-    board = parse_board(PIL.Image.open('Capture.png'))
-    for _ in range(5):
-        board._subdivide_overlapping_regions()
-        results = board._apply_certainties()
-    draw_board(board).show()
+            i = 100
+    return board
 
 
 if __name__ == '__main__':
