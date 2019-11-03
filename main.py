@@ -106,6 +106,13 @@ class Tile:
     def number(self):
         return int(self.text) if self.text and self.text != "?" else None
 
+    def draw_color(self):
+        if self.is_flagged:
+            return Color.FLAGGED_TILE
+        if self.is_safe:
+            return Color.SAFE_TILE
+        return self.color
+
 
 @attr.s(auto_attribs=True)
 class Constraint:
@@ -505,20 +512,12 @@ def simplify_polygon(vertices):
     return vertices
 
 
-def get_tile_draw_color(tile):
-    if tile.is_flagged:
-        return Color.FLAGGED_TILE
-    if tile.is_safe:
-        return Color.SAFE_TILE
-    return tile.color
-
-
 def draw_board(board, highlighted=None):
     font = get_font()
     image = PIL.Image.new('RGB', (2400, 2160), Color.BACKGROUND)
     pdraw = PIL.ImageDraw.Draw(image)
     for tile in board.tiles:
-        color = get_tile_draw_color(tile)
+        color = tile.draw_color()
         if isinstance(highlighted, (int, Tile)):
             if isinstance(highlighted, int):
                 focus, adj = list(board._adjacencies.items())[highlighted]
