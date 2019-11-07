@@ -14,6 +14,15 @@ def render_tile(board, tile, index, colors):
     """
 
 
+def render_color_counts(board):
+  scale = 120
+  return '\n'.join(
+      f'  <text x="3820" y="{i * scale}" text-anchor="end" fill="{color_to_hex(color)}" '
+      f'font-size="{scale}">{count}</text>'
+      for i, (color, count) in enumerate(board.get_remaining_color_count().items(), 1)
+  )
+
+
 def get_colors(board):
     return list({tile.draw_color() for tile in board.tiles})
 
@@ -33,6 +42,7 @@ def render_board(board):
     )
     tiles = "\n  ".join(render_tile(board, tile, i, colors) for i, tile in enumerate(board.tiles))
     adjacency_styles = ""
+    color_counts = render_color_counts(board)
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -76,6 +86,7 @@ def render_board(board):
 
 <svg width="1536" height="864" viewBox="0 0 3840 2160" style="background-color: rgb(20, 0, 35)">
   {tiles}
+  {color_counts}
   Sorry, your browser does not support inline SVG.
 </svg>
 
