@@ -10,6 +10,8 @@ import numpy
 import PIL.Image
 import PIL.ImageDraw
 
+import visualize
+
 
 def rotate(list_, rotate_amt):
     return list_[rotate_amt:] + list_[:rotate_amt]
@@ -122,7 +124,7 @@ def serialize_tile(initial_tile, final_tile, final_board):
         "is_mine": final_tile.is_flagged,
         "is_exposed": not initial_tile.is_unsolved,
         # TODO: god, stop.
-        "polygon": [[int(x) + 720, int(y)] for x, y in final_tile.polygon],
+        "polygon": [[int(x) + 120, int(y)] for x, y in final_tile.polygon],
     }
     # We only need to auto-expand tiles that are safe, don't start exposed,
     # and have no adjacent mines
@@ -140,6 +142,9 @@ def serialize_tiles(path):
     blank_board = main.parse_board(PIL.Image.open(test_dir / 'blank.png'))
     final_board = main.parse_board(PIL.Image.open(test_dir / 'final.png'))
 
+    visualize.visualize(blank_board)
+    visualize.visualize(final_board)
+
     # This is an absurdly rough match up, but I'm not sure how to improve accuracy confidence :#
     tiles = [
         serialize_tile(itile, ftile, final_board)
@@ -154,9 +159,12 @@ def run_simulation(path):
 
     sim = Simulation.from_path(path)
     with unittest.mock.patch("main.pyautogui", sim):
-        main.solve_live_game()
+        board = main.solve_live_game()
+
+    visualize.visualize(board)
 
     sim.screenshot().show()
+    assert board.is_solved()
 
 
 def main():

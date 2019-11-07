@@ -306,6 +306,9 @@ class Board:
             assert remaining[color] >= 0, remaining[color]
         return remaining
 
+    def is_solved(self):
+        return all(not tile.is_unsolved for tile in self.tiles)
+
 
 def merge_or_add(dict_, tiles, constraint):
     if tiles in dict_:
@@ -415,7 +418,7 @@ def read_tile_number(image_slice):
         # filter out areas too thin to be text
         if xs.stop - xs.start > 10 and ys.stop - ys.start > 10
         # filter out weird aspect ratios
-        and 0.25 <= (xs.stop - xs.start) / (ys.stop - ys.start) <= 0.7
+        and 0.25 <= (xs.stop - xs.start) / (ys.stop - ys.start) <= 0.75
     ]
     result = None
 
@@ -423,6 +426,7 @@ def read_tile_number(image_slice):
         # question mark is two strokes, god help me.
         # need to manually connect the dot back to the character
         ys, xs = area
+        height = ys.stop - ys.start
         dot_potentials = [
             (i, oys)
             for i, (oys, oxs) in enumerate(object_areas, 1)
@@ -431,7 +435,7 @@ def read_tile_number(image_slice):
             # relatively centered with our glyph
             and math.isclose(((xs.stop + xs.start) / 2), ((oxs.stop + oxs.start) / 2), abs_tol=1)
             # just below our glyph
-            and ys.stop < oys.start <= ys.stop + 10
+            and ys.stop < oys.start <= ys.stop + height / 5
         ]
         if dot_potentials:
             # Could likely safely just call it a question mark now, but just to be safe..
@@ -462,6 +466,7 @@ def reparse_updated_tiles(board, updated_tiles, image):
     for tile in updated_tiles:
         tile.text = read_tile_number(tile_area_pixels[tile.box])
         if tile.number is not None:
+            assert tile.number <= len(board._adjacencies[tile])
             board.generate_adjacency_constraint(tile)
 
     # need to check the other tiles: if we find a natural 0 it automatically expands.
@@ -477,6 +482,7 @@ def reparse_updated_tiles(board, updated_tiles, image):
             tile.tile_state = TileState.safe
             tile.text = read_tile_number(tile_area_pixels[tile.box])
             if tile.number is not None:
+                assert tile.number <= len(board._adjacencies[tile])
                 board.generate_adjacency_constraint(tile)
     board.remove_tiles_from_constraints(updated)
 
@@ -543,7 +549,7 @@ def simplify_polygon(vertices):
 
 def draw_board(board, highlighted=None):
     font = get_font()
-    image = PIL.Image.new('RGB', (2400, 2160), Color.BACKGROUND)
+    image = PIL.Image.new('RGB', (3600 - 120, 2160), Color.BACKGROUND)
     pdraw = PIL.ImageDraw.Draw(image)
     for tile in board.tiles:
         color = tile.draw_color()
@@ -605,7 +611,14 @@ def isolate_label(labeled, index, area):
     This means converting the labeled area to black and everything else to white,
     and adding a little padding to the edges.
     """
-    area = expand_area(area, 3)
+    # Tesseract is SO FINICKY.
+    # Two extra pixels of padding is too much to identify some numbers,
+    # yet two too few pixels of padding throws off others.
+    # If you need to update this ratio be sure to THOROUGHLY TEST
+    # that we can still read numbers.
+    ys, _ = area
+    spacing = round((ys.stop - ys.start) / 20)
+    area = expand_area(area, spacing)
     # Why can't we just use the mask with PIL mode "1"?
     # Because PIL is an endless nightmare, that's why.
     formatted = (labeled[area] != index) * 0xFF
@@ -707,7 +720,7 @@ def click_tiles(actions):
         x, y = tile.click_point
         button = 'left' if state == TileState.safe else 'right'
         # TODO: yow
-        pyautogui.click(x=x + 720, y=y, button=button)
+        pyautogui.click(x=x + 120, y=y, button=button)
 
 
 class BoardScreenshot:
@@ -716,7 +729,7 @@ class BoardScreenshot:
         self._array = numpy.array(image, dtype='uint8')
 
     def tile_area_pixels(self):
-        return self._array[:, 720:3120]
+        return self._array[:, 120:3600]
 
     def color_count_area_pixels(self):
         return self._array[:1080, 3600:]
