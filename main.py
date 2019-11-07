@@ -27,6 +27,7 @@ class Color(tuple, enum.Enum):
     SAFE_TILE = (0x33, 0x33, 0x33)
     FLAGGED_TILE = (0xE6, 0xE6, 0xE6)
     TEXT = (0xFF, 0xFF, 0xFF)
+    CORNER_ADJACENCY = (0xFF, 0xE6, 0x4D)
 
 
 def color_is_close(color1, color2):
@@ -633,6 +634,14 @@ def parse_color_count(pixels):
             combined_areas[key] = ColorTextArea(index=i, xs=xs)
     _validate_line_combos(combined_areas.keys())
 
+    # Fetch the top figure and see if it's the corner adjacency symbol
+    ys, color_area = min(combined_areas.items())
+    area = slice(*ys), color_area.xs
+    corner_adjacent = is_corner_adjacency_symbol(pixels, labeled, color_area.index, area)
+    # Don't try to parse the corner adjacency symbol as text
+    if corner_adjacent:
+        del combined_areas[ys]
+
     # Parse the text, and track the number associated with each color.
     # TODO: the corner-match icon shows up here too, gotta identify that.
     color_count = {}
@@ -649,7 +658,13 @@ def parse_color_count(pixels):
             color = darken(color)
         color_count[color] = int(text)
 
-    return color_count
+    return color_count, corner_adjacent
+
+
+def is_corner_adjacency_symbol(pixels, labeled, index, area):
+    colors = pixels[area][labeled[area] == index]
+    color = numpy.median(colors, axis=0)
+    return color_is_close(color, Color.CORNER_ADJACENCY)
 
 
 def _validate_line_combos(ys):
@@ -663,7 +678,7 @@ def darken(color):
 
 def parse_board(image):
     board_screenshot = BoardScreenshot(image)
-    color_count = parse_color_count(board_screenshot.color_count_area_pixels())
+    color_count, corner_adjacent = parse_color_count(board_screenshot.color_count_area_pixels())
     tile_area_pixels = board_screenshot.tile_area_pixels()
     mask = numpy.any(tile_area_pixels != Color.BACKGROUND, axis=-1)
     # `labeled` creates an array[x, y] = idx
